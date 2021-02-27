@@ -51,10 +51,9 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 from base64 import b64decode
 
-# Initialize you log configuration using the base class
-logging.basicConfig(level = logging.INFO)
-logger = logging.getLogger()
 
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
     
 AWSGENIE_SECRET_MANAGER="awsgenie_secret_manager"
 SLACK_SECRET_KEY_NAME="slack_url"
@@ -68,11 +67,11 @@ except Exception as e:
 
 
 def get_secret(sm_client,secret_key_name):
-    # if AWS_LAMBDA_FUNCTION_NAME == "":
+    get_secret_value_response = ""
+    text_secret_data = ""
     try:
-        text_secret_data = ""
         get_secret_value_response = sm_client.get_secret_value( SecretId=AWSGENIE_SECRET_MANAGER )
-    except ClientError as e:
+    except Exception as e:
         if e.response['Error']['Code'] == 'ResourceNotFoundException':
             logger.error("The requested secret " + secret_name + " was not found")
         elif e.response['Error']['Code'] == 'InvalidRequestException':
@@ -80,18 +79,21 @@ def get_secret(sm_client,secret_key_name):
         elif e.response['Error']['Code'] == 'InvalidParameterException':
             logger.error("The request had invalid params:", e)
 
-    # Secrets Manager decrypts the secret value using the associated KMS CMK
-    # Depending on whether the secret was a string or binary, only one of these fields will be populated
-    if 'SecretString' in get_secret_value_response:
-        text_secret_data = json.loads(get_secret_value_response['SecretString']).get(secret_key_name)
-    else:
-        #binary_secret_data = get_secret_value_response['SecretBinary']
-        logger.error("Binary Secrets not supported")
-
-        # Your code goes here.
+    try:
+        # Secrets Manager decrypts the secret value using the associated KMS CMK
+        # Depending on whether the secret was a string or binary, only one of these fields will be populated
+        if 'SecretString' in get_secret_value_response:
+            text_secret_data = json.loads(get_secret_value_response['SecretString'])[secret_key_name]
+        else:
+            logger.error(get_secret_value_response)
+            logger.error("SecretString not found.")
+    except Exception as e:
+        logger.error(e)
+        logger.error("Parsing SecretString: %s", get_secret_value_response)
+        raise e
+	
     return text_secret_data
-    # else:
-    #     return ""
+
 
 def send_slack(slack_url, message):
     #make it a NOP if URL is NULL
@@ -110,9 +112,11 @@ def send_slack(slack_url, message):
     except HTTPError as e:
         logger.error("Request failed: %d %s", e.code, e.reason)
         logger.error("SLACK_URL= %s", slack_url)
+        raise e
     except URLError as e:
         logger.error("Server connection failed: %s", e.reason)
-        logger.error("slack_url= %s", slack_url)
+        logger.error("slack_url=%s", slack_url)
+        raise e
 
 def send_sns(boto3_session, sns_arn, message):
     #make it a NOP if URL is NULL
@@ -131,19 +135,24 @@ def send_sns(boto3_session, sns_arn, message):
 
 
 def display_output(boto3_session, message):
-    secrets_manager_client = boto3_session.client('secretsmanager')
+    secrets_manager_client = None
+    if 'SECRETS_MANAGER_ENDPOINT' in os.environ:
+        logger.info("Using secrets_manager_endpoint.")
+        secrets_manager_client = boto3_session.client('secretsmanager', os.environ['SECRETS_MANAGER_ENDPOINT'])
+    else:
+        secrets_manager_client = boto3_session.client('secretsmanager')
+
     try:
-        slack_url='https://' + get_secret(secrets_manager_client, SLACK_SECRET_KEY_NAME)
+        slack_url = get_secret(secrets_manager_client, SLACK_SECRET_KEY_NAME)
         send_slack(slack_url, message)
     except Exception as e:
-        logger.info("Disabling Slack, URL not found")
+        logger.info("Sending Slack: %s", e)
 
     try:
         sns_arn=get_secret(secrets_manager_client, SNS_SECRET_KEY_NAME)
         send_sns(boto3_session, sns_arn, message)
     except Exception as e:
         logger.info("Disabling SNS, Arn not found")
-
     print(message)
 
 
@@ -357,8 +366,8 @@ def lambda_handler(event, context):
     try:
         publish_forecast(boto3)
     except Exception as e:
-        print(e)
-        raise Exception("Cannot connect to Cost Explorer with boto3")
+        logger.error("Failed: publish_forecast")
+        raise e
 
 def main():
     try:
